@@ -33,6 +33,10 @@ class WhisperModel(faster_whisper.WhisperModel):
     FasterWhisperModel provides batched inference for faster-whisper.
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
+    def __init__(self, *args, return_nbest=False, return_scores=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.return_nbest = return_nbest
+        self.return_scores = return_scores
 
     def generate_segment_batched(
         self,
@@ -72,20 +76,54 @@ class WhisperModel(faster_whisper.WhisperModel):
                 max_length=self.max_length,
                 suppress_blank=options.suppress_blank,
                 suppress_tokens=options.suppress_tokens,
+                num_hypotheses=options.best_of if self.return_nbest else 1,
+                return_scores=self.return_scores,
             )
 
-        tokens_batch = [x.sequences_ids[0] for x in result]
+        def decode_batch(tokens_list: List[List[int]]) -> List[str]:
+            filtered_tokens = [[token for token in tokens if token < tokenizer.eot] for tokens in tokens_list]
+            return tokenizer.tokenizer.decode_batch(filtered_tokens)
 
-        def decode_batch(tokens: List[List[int]]) -> str:
-            res = []
-            for tk in tokens:
-                res.append([token for token in tk if token < tokenizer.eot])
-            # text_tokens = [token for token in tokens if token < self.eot]
-            return tokenizer.tokenizer.decode_batch(res)
+        # Only process best hypothesis if return_nbest is False
+        if not hasattr(self, 'return_nbest') or not self.return_nbest:
+            best_hypotheses_batch = []
+            scores_batch = []
+            for segment_result in result:
+                best_hypotheses_batch.append(segment_result.sequences_ids[0])
+                if self.return_scores:
+                    scores_batch.append(segment_result.scores[0])
+                else:
+                    scores_batch.append(None)
 
-        text = decode_batch(tokens_batch)
+            # Decode best hypotheses only
+            text_batch = decode_batch(best_hypotheses_batch)
 
-        return text
+            output = []
+            for text, score in zip(text_batch, scores_batch):
+                item = {"text": text}
+                if self.return_scores:
+                    item["score"] = score
+                output.append(item)
+            return output
+        # Process all hypotheses if return_nbest is True
+        else:
+            output_batch = []
+            for segment_result in result:
+                texts = decode_batch(segment_result.sequences_ids)
+                hypotheses = []
+                for i, text in enumerate(texts):
+                    item = {"text": text}
+                    if self.return_scores:
+                        item["score"] = segment_result.scores[i]
+                    hypotheses.append(item)
+
+                best_text = hypotheses[0]["text"]
+                item = {"text": best_text, "hypotheses": hypotheses}
+                if self.return_scores:
+                    item["score"] = hypotheses[0]["score"]
+                output_batch.append(item)
+
+            return output_batch
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
@@ -263,18 +301,25 @@ class FasterWhisperPipeline(Pipeline):
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
-            text = out['text']
+            result = out['text']
             if batch_size in [0, 1, None]:
-                text = text[0]
+                result = result[0] if isinstance(result, list) else result
+            text = result["text"]
             if verbose:
                 print(f"Transcript: [{round(vad_segments[idx]['start'], 3)} --> {round(vad_segments[idx]['end'], 3)}] {text}")
-            segments.append(
-                {
-                    "text": text,
-                    "start": round(vad_segments[idx]['start'], 3),
-                    "end": round(vad_segments[idx]['end'], 3)
-                }
-            )
+
+            segment = {
+                "text": text,
+                "start": round(vad_segments[idx]['start'], 3),
+                "end": round(vad_segments[idx]['end'], 3),
+            }
+            
+            if self.model.return_nbest:
+                segment["hypotheses"] = result["hypotheses"]
+            if self.model.return_scores:
+                segment["score"] = result["score"]
+                
+            segments.append(segment)
 
         # revert the tokenizer if multilingual inference is enabled
         if self.preset_language is None:
@@ -316,6 +361,8 @@ def load_model(
     download_root: Optional[str] = None,
     local_files_only=False,
     threads=4,
+    return_nbest=False,
+    return_scores=False,
 ) -> FasterWhisperPipeline:
     """Load a Whisper model for inference.
     Args:
@@ -338,12 +385,14 @@ def load_model(
         language = "en"
 
     model = model or WhisperModel(whisper_arch,
-                         device=device,
-                         device_index=device_index,
-                         compute_type=compute_type,
-                         download_root=download_root,
-                         local_files_only=local_files_only,
-                         cpu_threads=threads)
+                        device=device,
+                        device_index=device_index,
+                        compute_type=compute_type,
+                        download_root=download_root,
+                        local_files_only=local_files_only,
+                        cpu_threads=threads,
+                        return_nbest=return_nbest,
+                        return_scores=return_scores,)
     if language is not None:
         tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
     else:
