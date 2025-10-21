@@ -1,3 +1,84 @@
+# WhisperX (Fork with N-best and Score Support)
+
+> **Note:** This is a fork of the official [m-bain/whisperX](https://github.com/m-bain/whisperX) repository. It adds the capability to retrieve the N-best transcription hypotheses and their corresponding scores. The original documentation from the upstream repository can be found below this section.
+
+## Installation of this Fork
+
+### Prerequisites
+
+This project requires a **NVIDIA GPU** and a working installation of the **CUDA Toolkit**.
+
+### Environment Setup
+
+1.  **Clone this repository:**
+    ```bash
+    git clone https://github.com/dqvid3/whisperX.git
+    cd whisperX
+    ```
+
+2.  **Create the Base Conda Environment:**
+    This command uses the `environment.yml` file to install all dependencies **except for PyTorch**.
+    ```bash
+    conda env create -f environment.yml
+    conda activate whisperx-dev
+    ```
+
+3.  **Install PyTorch with CUDA support:**
+    Now, install the correct version of PyTorch that matches your system's CUDA Toolkit. Go to the [PyTorch website](https://pytorch.org/get-started/locally/) to find the exact command for your setup.
+
+    For example, for **CUDA 12.8**, the command is typically:
+    ```bash
+    pip3 install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+    ```
+    > **Note:** Executing this step is crucial for GPU acceleration.
+
+4.  **Install the fork in editable mode:**
+    Finally, link your Conda environment to this local source code.
+    ```bash
+    pip install -e .
+    ```
+
+## Usage Example
+
+You can now import and use `whisperx` in your Python projects. The key difference is the ability to pass `return_nbest=True` and `return_scores=True` when loading the model.
+
+```python
+import whisperx
+
+device = "cuda" 
+audio_file = "path/to/your/audio.wav"
+
+# best_of: number of hypotheses to generate (n_hypothesis)
+asr_options = {"best_of": 30, "beam_size": 30}
+
+# Load the model with the new options enabled
+model = whisperx.load_model(
+    "large-v2", 
+    device, 
+    compute_type="float16", 
+    asr_options=asr_options,
+    return_nbest=True, 
+    return_scores=True
+)
+
+# The result dictionary will now contain the hypotheses and scores for each segment
+result = model.transcribe(audio_file, batch_size=16)
+
+# Example of accessing the new data
+for segment in result["segments"]:
+    print(f"Segment: [{segment['start']}s -> {segment['end']}s] {segment['text']} - Score: {segment['score']}")
+    if "hypotheses" in segment:
+        print("  All Hypotheses:")
+        for hypo in segment["hypotheses"]:
+            score = hypo["score"]
+            print(f"    - Text: {hypo['text']} - Score: {score}")
+    print()
+```
+
+<br>
+
+---
+
 <h1 align="center">WhisperX</h1>
 
 ## Recall.ai - Meeting Transcription API
